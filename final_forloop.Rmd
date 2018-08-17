@@ -1,0 +1,239 @@
+---
+title: "Catch maps"
+output: html_notebook
+---
+### Catch data from the Rockfish Recruitment and Ecosystem Assessment Survey
+[link](https://swfsc.noaa.gov/textblock.aspx?Division=FED&ParentMenuId=54&id=19340)
+
+**Project**: This project utilizes data collected by the NOAA NMFS SWFSC Santa Cruz as part of the Rockfish Recruitment and Ecosystem Assessment Survey. The Rockfish Recruitment and Ecosystem Assessment Survey is a long-term ocean-going survey, which commenced in 1983 to monitor the recruitment of pelagic juvenile rockfish and other ecosystem components along the entire coast of California. 
+
+I would eventually like to convert this output into a shiny app that can be readily shared. 
+
+**Data**: This project uses catch data dutifly recorded, entered and cleaned by Chief Scientist Keith Sakuma (keith.sakuma@noaa.gov). 
+These data are held in an access database stored on the "CRUISE" shared drive at smb://swc-sc-fs/cruise // MWT // juv_cruise_backup08FEB18 (with the most recent date listed)- note that I am not using *the* most up to date version, as Keith is currently out to sea and the data has not been adequately checked and corrected. Note also that this is a backup of the SQL database which is the ultimate source for these data. 
+
+Although it is possible to access the data directly from this access database, my Mac doesn't have Access installed, and my PC laptop does not have 64+ bit version of windows installed-- which causes all sorts of issues. Anyways, to circumvent RODBC, I exported the following tables that I needed from the access dataset (juv_cruise_backup08FEB18):
+
+dbo_JUV_HAUL * note: I had to add two zeros to stations (1101 and 1106) to enable eventual conversion of coordinates will need to re add if re-load data (not enough digits to convert from decimal minutes to dec deg ex. 122 instead of 12200)
+dbo_JUV_CATCH
+dbo_SPECIES_CODES
+dbo_STANDARD_STATIONS
+dbo_NWFSC_STANDARD_STATIONS (in some years, we also surveyed sites typically covered by NWFSC)
+
+For each of these tables, I right-clicked the table name and selected Export// Text File (did *not* select box for export data with formating and layout) and changed the extension to a .csv. I then was brought to a Export Text Wizard box, where I selected "Delimited" (Next), then selected "comma" and checked the box for "Include field names on first row"
+
+### First, read in data files 
+```{r read in files, echo=FALSE}
+# read in files
+juv_catch<- read.csv("dbo_JUV_CATCH.csv", header=TRUE) # read in juvenile catch data
+juv_haul <- read.csv("dbo_JUV_HAUL.csv", header=TRUE) # read in haul data- including station info
+species_codes <- read.csv("dbo_SPECIES_CODES.csv", header=TRUE) # read in species code table
+swfsc_stations<- read.csv("dbo_STANDARD_STATIONS.csv", header = TRUE) # read in station information including lat long data
+nwfsc_stations<- read.csv("dbo_NWFSC_STANDARD_STATIONS.csv", header = TRUE) # NWFSC stations
+```
+### Load libraries
+```{r load libraries, echo=TRUE, results='hide' }
+library(tidyverse)
+library(sf)
+library(ggplot2)
+library(ggmap) #requires ggplot2
+library(lubridate)
+library(ggplot2)
+library(ggmap)
+```
+Note: depending on your version of R and ggplot, there may be some challenges initially with loading maps via {ggmap}. If you experience problems, try downloading the development version of ggplot2 and ggmap (directly from source)
+devtools::install_github("hadley/ggplot2")
+devtools::install_github("dkahle/ggmap")
+
+### Add trawl information to catch data
+First step is to add new column to juv_haul describing the year of the trawl
+```{r echo=TRUE, results='hide'}
+# add two new columns to juv_haul df: time: parsed time, and year: year of haul 
+juv_haul <- juv_haul %>% # df that we are working with
+    mutate(time= parse_date_time(juv_haul$HAUL_DATE, orders = "mdy HMS")) %>% # this creates a new column of converted dates- from HAUL_DATE
+    mutate(year= year(time)) 
+```
+### Merge species information and haul information from (species_codes and stations_yr) and select standard stations 
+Next, because these tables are no longer linked in a relational database, I need to merge the species name information to the juv_catch df (common name, sci name, notes) from species_codes df (primary key is "SPECIES") and haul location information (stations, lat, long, bottom depth) from juv_haul (primary key "haul and cruise"). Additionally, i selected only those rows of data where standard_station==1 (if other than 1, there was some kind of problem with data)
+```{r}
+catch <- juv_catch %>%  # our main df that we want to add data to
+              left_join(select(species_codes, -PACFIN_CODE, -MATURITY_CODES), by="SPECIES")%>% # joined specific columns from our second df, species_codes -col
+              left_join(select(juv_haul, CRUISE, HAUL_NO, STATION, DEPTH_STRATA, BOTTOM_DEPTH, PROBLEM, STANDARD_STATION, time, year), by=c("CRUISE", "HAUL_NO")) %>% #  merge station information from juv_haul to juv_catch based on cruise and haul number
+              filter(STANDARD_STATION==1) # this selects ONLY those stations that were "standard_stations" note: only those rows with standard_station==1, 0= problem!!!
+
+#  note that we selected only those rows where STANDARD_STATION==1. This includes rows with problem codes 0 or 2. 0 means no problems, and 2= rockfish were subsampled, but otherwise a standard haul. Note that the depth strata code: 1= shallow, 2= std, 3= 90m and 4= other. Our catch df only contains data from depth strata 1 or 2 which is either standard or shallow, so ok! 
+# note that at this point, there are potentially multiple rows for a given station (for those sites that were trawled multiple times in a given year)
+```
+
+### Stations information-- list of stations trawled each year
+Create a df for year and station. This is a comprehensive list of each station that was trawled in a given year. (We will reference this df later in our plot and for those stations not represented by a given year-station combination in species_yr, will plot as + on final map)- ie areas that were fished but did not encounter a particular spp. 
+
+```{r create list of stations trawled each year}
+stations_yr <- juv_haul %>% # creates new column of just years using the year() function- extracts year info from time column
+    filter(STANDARD_STATION==1) %>% # only include standard stations (ie standard station=1, not 0)- otherwise problem or special tow- don't want
+    group_by(year, STATION) %>% # group these data by year and station
+    summarise() # col= year, station. For each year a list of (non-repeating) stations sampled and fished correctly
+ 
+```
+##### Coordinate information for stations #####
+Next, I need to add latitude and longitude values. 
+Can use sum(is.na(stations$LONGITUDE)) to check to ensure there are still no stations missing lat long data
+```{r combine dfs via bind_rows, echo=TRUE, results='hide'}
+# combine station lists from the SWFSC (stations) with the lsit from the NWFSC (nwfsc_stations) via rbind (bind by row)
+# in dplyr this is accomplished via the bind_rows() function 
+swfsc_stations <- select(swfsc_stations, -ACTIVE) # remove row only in swfsc_stations df, not nwfsc_stations
+nwfsc_stations$LATITUDE <- as.numeric(nwfsc_stations$LATITUDE) # convert all values to numeric- so in the same class class(nwfsc_stations$LATITUDE)
+stations<- bind_rows(swfsc=swfsc_stations, nwfsc=nwfsc_stations, .id = "sci_center") # combine rows from swfsc and nwfsc dfs (all have same columns) also created new column for "sci_center" to describe which science center the site came from 
+# note this still returns an error because the factor levels are different which they are- all good
+```
+
+##### Convert station coordinates from decimal minutes to decimal degrees #####
+The below code was how I converted from decimal minutes to decimal degrees, but instead, I am going to use code provided by KS (in chunk)
+stations<-stations%>%
+  separate(LATITUDE, into = c("deg_lat", "min_lat"), sep=2) %>%
+  separate(LONGITUDE, into = c("deg_long", "min_long"), sep=3)%>%
+  mutate(deg_lat= as.numeric(deg_lat), min_lat=as.numeric(min_lat), deg_long=  as.numeric(deg_long), min_long=as.numeric(min_long)) %>%
+  mutate(min_lat= min_lat/60, min_long=min_long/60) %>%
+  mutate(LATITUDE= deg_lat+min_lat, LONGITUDE=deg_long + min_long) %>%
+  mutate(LATITUDE= round(as.numeric(LATITUDE), digits = 3))%>%
+  mutate(LONGITUDE= -(round(as.numeric(LONGITUDE), digits = 3)))%>%
+  select(-c(deg_lat, min_lat, deg_long, min_long))
+  
+  The following code was created by Kevin Stierhoff and provides better resolution for position information 
+```{r convert to decimal degrees, ECHO=TRUE, results='hide'}
+
+stations <- stations %>% 
+            rename(y = LATITUDE, x = LONGITUDE) %>% 
+            mutate(lat.d  = as.numeric(str_sub(y, 1, 2)),
+            lat.m  = as.numeric(str_sub(y, 3, 7)),
+            LATITUDE    = lat.d + lat.m/60,
+            long.d = as.numeric(str_sub(x, 1, 3)),
+            long.m = as.numeric(str_sub(x, 4, 8)),
+            LONGITUDE = -(long.d + long.m/60)) %>%
+            select(-c(lat.d, long.d, lat.m, long.m))
+```
+# Combine coordinate information with list of stations trawled in a given year  ######
+```{r add coordinate info to station_yr df, echo=T, results='hide'}
+stations_yr <- stations_yr %>%
+              left_join(select(stations, STATION_BOTTOM_DEPTH, LATITUDE, LONGITUDE, STATION, AREA), by="STATION") # joined cols from stations to our list of stations trawled each year. 
+
+rm(stations, nwfsc_stations, swfsc_stations, juv_haul, juv_catch, species_codes) # removed columns we no longer need
+# the output of this is a df stations_yr which lists every station trawled for all years and its associated lat long coordinate information. This will be later combined with spp information to plot in map 
+
+# finally, need to create a simple table of station locations without the additional year information. Ie one value of lat and long per station (total of 170 stations surveyed)
+stations<-  stations_yr %>%
+              ungroup()%>%            
+              group_by(STATION, STATION_BOTTOM_DEPTH, LATITUDE, LONGITUDE, AREA) %>%
+              summarize()
+              
+```
+### Create Basemap
+```{r generate basemap with get_map, echo=TRUE, results='hide'}
+# read in .shp file of US states from USGS stored in folder "states" using {sf}
+ca_nad <- st_read(dsn ="/Volumes/ilysa.iglesias/ROCKFISH/Projects/JRREACruise/cruise_catch/states/cb_2017_us_state_5m.shp" ) # note that this is the path on my mac
+# convert to WGS84
+ca <- st_transform(ca_nad, crs=4326) # transform to WGS84 or in this case the crs of the point df species_yr_sf- note have to run this before it will recognize necessary info from species_yr_sf-- run through at least one loop first 
+#st_crs(ca) # to ensure it is in the correct position (which matches our species_yr_sf df in WGS84)
+rm(ca_nad)
+```
+Note: previously I used some of the basemaps available through the ggmap package: stamen and google maps. Unforutnately, these maps did not project correctly and my data layers were off (appeared on land). Thus, I am opting to use the simple USGS layer for states, but in the future, if I can figure out the projection issue, the ggmaps are prettier. For future reference, in order to obtain a basemap through get_map() in ggmap, I used the following code:
+ca<- ggmap(get_map(location = c(-126, 32, -116, 42), source= "stamen", scale = "auto", maptype = "terrain", crop = FALSE))
+And i tried, via the following to reproject, but it didn't work 
+ca_map<- ca+
+coord_sf(crs = 4326)
+st_crs(ca_map) returns an NA
+
+### Create distribution and abundance maps for specific species and years -- for loop
+
+The following will run every year for every spp
+spp <- unique(catch$COMMON_NAME) # vector of unique species names 
+years <- unique(catch$year) # this is a list of each year that the survey operated 
+
+### For particular spp or year combination
+```{r for loop for generating maps, echo=TRUE}
+
+spp<- "NORTHERN LAMPFISH" #unique(catch$COMMON_NAME)
+years<- unique(catch$year)
+
+# select species
+for(i in 1:length(spp)) {
+       spp.i<- spp[i] 
+              species<-catch %>%
+                filter(COMMON_NAME==spp.i) %>% # filter by a specific spp within our catch df
+                group_by(year, STATION, COMMON_NAME)%>% # group by year, station, common_name (other columns maintained)         
+                summarise(TOTAL_MEAN= mean(TOTAL_NO), se_station= sd(TOTAL_NO)/sqrt(n()))%>% # need to take the mean catch per station as some stations were sampled multiple times  per year. Also calculated the standard error for each station, which gave an NA if there was only one station per year
+                left_join(select(stations, STATION, LATITUDE, LONGITUDE, STATION_BOTTOM_DEPTH), by= "STATION") # add lat long data for each station with particular spp
+       
+       # for given spp, select year          
+        for(j in 1:length(years)){
+              year.j<- years[j] 
+                        species_yr <- species %>%
+                          filter(year==year.j)
+        
+        # creat df of stations that were trawled but didn't capture any spp.i in year.j 
+               nocatch <- stations_yr %>% # selects from our station df which lists each station surveyed per year
+                            filter(year== year.j)%>% # filter this database for our specific year
+                            filter(!(STATION %in% species_yr$STATION)) # selects only those values from our station table that DONT match the stations within species_yr (those sations where a given species WERE found)
+        
+        
+        # not plotting map for years where 0 of a spp were captured (could be because spp wasn't enumerated in that year, OR none were captured-- see notes for clarification)
+        
+        if(nrow(species_yr) == 0){
+          print(paste("Zero", spp.i, "caught in", year.j, "or species not enumerated in this year",sep= " "))
+        }else{
+          species_yr_sf<- st_as_sf(species_yr, coords = c("LONGITUDE", "LATITUDE"), crs=4326)# note crs code is for WGS84 crs=4326
+          #species_yr_sf<-st_transform(species_yr_sf, 32610 )# convert to stamen map projection
+          
+          nocatch_sf<- st_as_sf(nocatch, coords = c("LONGITUDE", "LATITUDE"), crs=4326) # convert no catch point layer into sf feature
+          #nocatch_sf <- st_transform(nocatch_sf, crs=32610)
+          
+        
+          ggplot()+
+            geom_sf(data=ca, aes(), fill="antiquewhite3", alpha=0.6, inherit.aes=FALSE)+ # plot simple .shp basemap
+            geom_sf(data= nocatch_sf,aes(), alpha= 0.4, shape=43, size=3, inherit.aes = FALSE)+ # add survey locations where no catch occured
+            geom_sf(data = species_yr_sf, aes(size= TOTAL_MEAN), color= "lightseagreen", alpha=0.5, inherit.aes = FALSE, show.legend = "point") + #inhereit.aes removes an error message and this adds our species specific catch data for a given year
+            theme(legend.key = element_blank(), panel.grid.major = element_line(colour = "transparent"), panel.background = element_blank())+ # removes boxes around legend symbols, removes grid lines on map and background color for our polygon layer
+            labs(size='Catch per trawl') + # legend title
+            coord_sf(xlim = c(-126, -116), ylim = c(32, 42), crs=4326)+ # note: this sets the projection info to latlong, WGS84 (to check use st_crs) this also sets a static map zoom to better facilitate comparisons bw years but can be changed based on min, max values of coordinates in given querry
+            xlab("Longitude")+
+            ylab("Latitude")+
+            ggtitle(paste0(spp.i, " ", year.j, sep=" ")) # main title
+          
+          ggsave(filename = paste0(spp.i, " ", year.j, ".pdf", sep=""), device= "pdf", path = paste0(print(getwd()), "/plots"), width = 8, height = 10)
+        }
+        }
+}
+```
+
+### for reference: total number of stations surveyed per year--- theis still needs fleshing out
+This is mainly in the event that I later choose to plot a total # 
+```{r}
+total_stations <- stations_yr %>%
+                  group_by( year) %>%
+                  summarise( total_st= length(STATION))
+
+# plot total number caught per depth note this is only for one year, would otherwise need to use catch and take the mean catch --note this example is only for one year
+ggplot(data = species_yr) +
+  geom_point(aes(x=STATION_BOTTOM_DEPTH, y=TOTAL_MEAN))+
+  geom_smooth(aes(x=STATION_BOTTOM_DEPTH, y=TOTAL_MEAN))
+
+```
+
+**NOTE** For those years where we surveyed North of our typical sites (ex. Oregon and Washington), these values are cut out of the map. In order to add these to the map, or in general to ensure that our zoom is focused on specific locations based on results, could use the following:
+
+ylim<- c(min(species_year$LATITUDE)-1, max(species_year$LATITUDE)+1)
+xlim<- c(min(species_year$LONGITUDE)-1, max(species_year$LONGITUDE)+1)
+coord_sf(xlim= xlim , ylim= ylim, crs = 4326)+ # specifies our spp specific distribution and ensure correct projection info-- going to try static values this round
+
+I am purposely choosing to keep the current boundaries that I have because I like the standardized maps, but these could def be easily altered in the future! 
+
+***NOTE***
+As of June 29th, 2018: I am updating the underlying basemap for these for loops because the ggmap function for getmap() returns maps that do not project properly with our point catch data. I was able to correctly project a .shp file of states and am playing around with a hillshade layer (downloaded from https://koordinates.com/ but from cal-atlas, 30m)
+
+Also trying USGS map 
+https://catalog.data.gov/dataset/usgs-hill-shade-base-map-service-from-the-national-map
+
+Or open street map
+http://download.osmand.net/hillshade/ and downloaded the map for California- no idea what reference info 
+
+
