@@ -7,10 +7,8 @@ output: html_notebook
 
 **Project**: This project utilizes data collected by the NOAA NMFS SWFSC Santa Cruz as part of the Rockfish Recruitment and Ecosystem Assessment Survey. The Rockfish Recruitment and Ecosystem Assessment Survey is a long-term ocean-going survey, which commenced in 1983 to monitor the recruitment of pelagic juvenile rockfish and other ecosystem components along the entire coast of California. 
 
-I would eventually like to convert this output into a shiny app that can be readily shared. 
-
 **Data**: This project uses catch data dutifly recorded, entered and cleaned by Chief Scientist Keith Sakuma (keith.sakuma@noaa.gov). 
-These data are held in an access database stored on the "CRUISE" shared drive at smb://swc-sc-fs/cruise // MWT // juv_cruise_backup08FEB18 (with the most recent date listed)- note that I am not using *the* most up to date version, as Keith is currently out to sea and the data has not been adequately checked and corrected. Note also that this is a backup of the SQL database which is the ultimate source for these data. 
+These data are held in an access database stored on the "CRUISE" shared drive at smb://swc-sc-fs/cruise // MWT // juv_cruise_backup08FEB18 (with the most recent date listed)- note that I am not using *the* most up to date version, as the cruise recently concluded and the data has not been adequately checked and corrected. Note also that this is a backup of the SQL database which is the ultimate source for these data. 
 
 Although it is possible to access the data directly from this access database, my Mac doesn't have Access installed, and my PC laptop does not have 64+ bit version of windows installed-- which causes all sorts of issues. Anyways, to circumvent RODBC, I exported the following tables that I needed from the access dataset (juv_cruise_backup08FEB18):
 
@@ -38,12 +36,11 @@ library(sf)
 library(ggplot2)
 library(ggmap) #requires ggplot2
 library(lubridate)
-library(ggplot2)
-library(ggmap)
 ```
 Note: depending on your version of R and ggplot, there may be some challenges initially with loading maps via {ggmap}. If you experience problems, try downloading the development version of ggplot2 and ggmap (directly from source)
 devtools::install_github("hadley/ggplot2")
 devtools::install_github("dkahle/ggmap")
+Note2: Because of projection issues, I am no longer relying on ggmaps for basemaps
 
 ### Add trawl information to catch data
 First step is to add new column to juv_haul describing the year of the trawl
@@ -53,20 +50,23 @@ juv_haul <- juv_haul %>% # df that we are working with
     mutate(time= parse_date_time(juv_haul$HAUL_DATE, orders = "mdy HMS")) %>% # this creates a new column of converted dates- from HAUL_DATE
     mutate(year= year(time)) 
 ```
-### Merge species information and haul information from (species_codes and stations_yr) and select standard stations 
-Next, because these tables are no longer linked in a relational database, I need to merge the species name information to the juv_catch df (common name, sci name, notes) from species_codes df (primary key is "SPECIES") and haul location information (stations, lat, long, bottom depth) from juv_haul (primary key "haul and cruise"). Additionally, i selected only those rows of data where standard_station==1 (if other than 1, there was some kind of problem with data)
+### Merge species information and haul information 
+Next, because these tables are no longer linked in a relational database, I need to merge the species name information to the juv_catch df (common name, sci name, notes) from species_codes df (primary key is "SPECIES") and haul location information (stations, lat, long, bottom depth) from juv_haul (primary key "haul and cruise"). Additionally, i selected only those rows of data where standard_station==1 (if other than 1, there was an issue with the data, and we do not want to include it in analysis)
 ```{r}
 catch <- juv_catch %>%  # our main df that we want to add data to
               left_join(select(species_codes, -PACFIN_CODE, -MATURITY_CODES), by="SPECIES")%>% # joined specific columns from our second df, species_codes -col
               left_join(select(juv_haul, CRUISE, HAUL_NO, STATION, DEPTH_STRATA, BOTTOM_DEPTH, PROBLEM, STANDARD_STATION, time, year), by=c("CRUISE", "HAUL_NO")) %>% #  merge station information from juv_haul to juv_catch based on cruise and haul number
               filter(STANDARD_STATION==1) # this selects ONLY those stations that were "standard_stations" note: only those rows with standard_station==1, 0= problem!!!
 
-#  note that we selected only those rows where STANDARD_STATION==1. This includes rows with problem codes 0 or 2. 0 means no problems, and 2= rockfish were subsampled, but otherwise a standard haul. Note that the depth strata code: 1= shallow, 2= std, 3= 90m and 4= other. Our catch df only contains data from depth strata 1 or 2 which is either standard or shallow, so ok! 
-# note that at this point, there are potentially multiple rows for a given station (for those sites that were trawled multiple times in a given year)
-```
 
-### Stations information-- list of stations trawled each year
-Create a df for year and station. This is a comprehensive list of each station that was trawled in a given year. (We will reference this df later in our plot and for those stations not represented by a given year-station combination in species_yr, will plot as + on final map)- ie areas that were fished but did not encounter a particular spp. 
+```
+note that we selected only those rows where STANDARD_STATION==1. This includes rows with problem codes 0 or 2. 0 means no problems, and 2= rockfish were subsampled, but otherwise a standard haul. Note that the depth strata code: 1= shallow, 2= std, 3= 90m and 4= other. Our catch df only contains data from depth strata 1 or 2 which is either standard or shallow, so ok! 
+
+note that at this point, there are potentially multiple rows for a given station (for those sites that were trawled multiple times in a given year) 
+Stations information-- list of stations trawled each year
+
+### Create a df for year and station. 
+This is a comprehensive list of each station that was trawled in a given year. (We will reference this df later in our plot and for those stations not represented by a given year-station combination in species_yr, will plot as + on final map)- ie areas that were fished but did not encounter a particular spp. 
 
 ```{r create list of stations trawled each year}
 stations_yr <- juv_haul %>% # creates new column of just years using the year() function- extracts year info from time column
@@ -75,11 +75,11 @@ stations_yr <- juv_haul %>% # creates new column of just years using the year() 
     summarise() # col= year, station. For each year a list of (non-repeating) stations sampled and fished correctly
  
 ```
-##### Coordinate information for stations #####
+### Coordinate information for stations #####
 Next, I need to add latitude and longitude values. 
 Can use sum(is.na(stations$LONGITUDE)) to check to ensure there are still no stations missing lat long data
 ```{r combine dfs via bind_rows, echo=TRUE, results='hide'}
-# combine station lists from the SWFSC (stations) with the lsit from the NWFSC (nwfsc_stations) via rbind (bind by row)
+# combine station lists from the SWFSC (stations) with the list from the NWFSC (nwfsc_stations) via rbind (bind by row)
 # in dplyr this is accomplished via the bind_rows() function 
 swfsc_stations <- select(swfsc_stations, -ACTIVE) # remove row only in swfsc_stations df, not nwfsc_stations
 nwfsc_stations$LATITUDE <- as.numeric(nwfsc_stations$LATITUDE) # convert all values to numeric- so in the same class class(nwfsc_stations$LATITUDE)
@@ -87,7 +87,7 @@ stations<- bind_rows(swfsc=swfsc_stations, nwfsc=nwfsc_stations, .id = "sci_cent
 # note this still returns an error because the factor levels are different which they are- all good
 ```
 
-##### Convert station coordinates from decimal minutes to decimal degrees #####
+### Convert station coordinates from decimal minutes to decimal degrees #####
 The below code was how I converted from decimal minutes to decimal degrees, but instead, I am going to use code provided by KS (in chunk)
 stations<-stations%>%
   separate(LATITUDE, into = c("deg_lat", "min_lat"), sep=2) %>%
@@ -112,7 +112,7 @@ stations <- stations %>%
             LONGITUDE = -(long.d + long.m/60)) %>%
             select(-c(lat.d, long.d, lat.m, long.m))
 ```
-# Combine coordinate information with list of stations trawled in a given year  ######
+### Combine coordinate information with list of stations trawled in a given year  ######
 ```{r add coordinate info to station_yr df, echo=T, results='hide'}
 stations_yr <- stations_yr %>%
               left_join(select(stations, STATION_BOTTOM_DEPTH, LATITUDE, LONGITUDE, STATION, AREA), by="STATION") # joined cols from stations to our list of stations trawled each year. 
@@ -127,10 +127,10 @@ stations<-  stations_yr %>%
               summarize()
               
 ```
-### Create Basemap
-```{r generate basemap with get_map, echo=TRUE, results='hide'}
+### Create state basemap from .shp
+```{r generate basemap from shp file, echo=TRUE, results='hide'}
 # read in .shp file of US states from USGS stored in folder "states" using {sf}
-ca_nad <- st_read(dsn ="/Volumes/ilysa.iglesias/ROCKFISH/Projects/JRREACruise/cruise_catch/states/cb_2017_us_state_5m.shp" ) # note that this is the path on my mac
+ca_nad <- st_read(dsn ="/Volumes/ilysa.iglesias/ROCKFISH/Projects/JRREACruise/rrea_map/states/cb_2017_us_state_5m.shp" ) # note that this is the path on my mac
 # convert to WGS84
 ca <- st_transform(ca_nad, crs=4326) # transform to WGS84 or in this case the crs of the point df species_yr_sf- note have to run this before it will recognize necessary info from species_yr_sf-- run through at least one loop first 
 #st_crs(ca) # to ensure it is in the correct position (which matches our species_yr_sf df in WGS84)
@@ -143,6 +143,31 @@ ca_map<- ca+
 coord_sf(crs = 4326)
 st_crs(ca_map) returns an NA
 
+#### Create ocean/terrain basemap from natural earth raster
+I added ocean content and terrain texture to the map via natural earth (https://cran.r-project.org/web/packages/rnaturalearth/README.html)
+Although there is a package you can add to R to work with natural earth, I couldn't find the ocean version within the package and instead downloaded the desired baselayer (as a geotiff) directly from the natural earth website (note i downloaded 50m resolution, but 10m was available)
+https://www.naturalearthdata.com/downloads/50m-gray-earth/gray-earth-with-ocean-bottom/
+once map was downloaded, I placed this file in my folder rrea-cruise (GRAY_50M_SR_OB)-this folder contains multiple files
+
+```{r create basemap of ocean and terrain}
+#install.packages("raster")
+library(raster) # need to load {raster} package in order to upload geotif and convert to dataframe so it can be read into ggplot
+
+#create a raster layer from natural earth data and convert to a dataframe 
+basemap_raster <- raster(paste0(getwd(), "/", "GRAY_50M_SR_OB/GRAY_50M_SR_OB.tif")) # create raster file from .tif of ocean and land layer- note datum is WGS84
+ # convert raster to df so it can be read by ggplot 
+basemap_c <- rasterToPoints(basemap_raster) # {raster} package function for converting to points
+basemap_df <- data.frame(basemap_c) # then convert to dataframe
+colnames(basemap_df) <- c("X","Y","elevation")
+basemap <- basemap_df %>%
+            filter(X>=-126 & X<=-114, Y>=32 & Y<= 44) # i selected for only those values within our maping region so as to limit the size of the file!! Note that this is still slightly larger than our map extent of x = c(-126, -116), y= c(32, 42)
+rm(basemap_raster, basemap_c, basemap_df)
+detach(package:raster) # because this package blocks functionality of dplyr "select", need to turn it off once created!
+
+library(tidyverse) # because some objects were blocked with {raster} so reload tidyverse packages 
+# head(basemap) to ensure that the df object was created properly
+```
+
 ### Create distribution and abundance maps for specific species and years -- for loop
 
 The following will run every year for every spp
@@ -152,8 +177,8 @@ years <- unique(catch$year) # this is a list of each year that the survey operat
 ### For particular spp or year combination
 ```{r for loop for generating maps, echo=TRUE}
 
-spp<- "NORTHERN LAMPFISH" #unique(catch$COMMON_NAME)
-years<- unique(catch$year)
+spp<- "BLUE LANTERNFISH" #unique(catch$COMMON_NAME)
+years<- c(2015, 2017) #unique(catch$year)
 
 # select species
 for(i in 1:length(spp)) {
@@ -189,9 +214,11 @@ for(i in 1:length(spp)) {
           
         
           ggplot()+
-            geom_sf(data=ca, aes(), fill="antiquewhite3", alpha=0.6, inherit.aes=FALSE)+ # plot simple .shp basemap
-            geom_sf(data= nocatch_sf,aes(), alpha= 0.4, shape=43, size=3, inherit.aes = FALSE)+ # add survey locations where no catch occured
-            geom_sf(data = species_yr_sf, aes(size= TOTAL_MEAN), color= "lightseagreen", alpha=0.5, inherit.aes = FALSE, show.legend = "point") + #inhereit.aes removes an error message and this adds our species specific catch data for a given year
+            geom_raster(data = basemap, mapping = aes(X,Y, fill=elevation), alpha=0.7, show.legend = FALSE)+ # add basemap layer of ocean and terrain
+            scale_fill_gradient(low = "black", high = "white")+  # ...with black and white color pattern    
+            geom_sf(data=ca, aes(), fill="antiquewhite3", alpha=0.9, inherit.aes=FALSE)+ # plot simple .shp layer of states
+            geom_sf(data= nocatch_sf,aes(), alpha= 0.7, shape=43, size=3, inherit.aes = FALSE)+ # add survey locations where no catch occured
+            geom_sf(data = species_yr_sf, aes(size= TOTAL_MEAN), fill= "cyan", color= "black", pch=21, alpha=0.6, inherit.aes = FALSE, show.legend = "point") + #inhereit.aes removes an error message and this adds our species specific catch data for a given year-- note that the point size is relative and varies per year
             theme(legend.key = element_blank(), panel.grid.major = element_line(colour = "transparent"), panel.background = element_blank())+ # removes boxes around legend symbols, removes grid lines on map and background color for our polygon layer
             labs(size='Catch per trawl') + # legend title
             coord_sf(xlim = c(-126, -116), ylim = c(32, 42), crs=4326)+ # note: this sets the projection info to latlong, WGS84 (to check use st_crs) this also sets a static map zoom to better facilitate comparisons bw years but can be changed based on min, max values of coordinates in given querry
@@ -199,13 +226,15 @@ for(i in 1:length(spp)) {
             ylab("Latitude")+
             ggtitle(paste0(spp.i, " ", year.j, sep=" ")) # main title
           
-          ggsave(filename = paste0(spp.i, " ", year.j, ".pdf", sep=""), device= "pdf", path = paste0(print(getwd()), "/plots"), width = 8, height = 10)
+          ggsave(filename = paste0(spp.i, " ", year.j, ".pdf", sep=""), device= "pdf", path = paste0(print(getwd()), "/plots"), width = 7, height = 09)
+        
+          
         }
         }
 }
 ```
-
-### for reference: total number of stations surveyed per year--- theis still needs fleshing out
+### below this point are items just for future reference: 
+***NOTE *** Total number of stations surveyed per year--- this still needs fleshing out
 This is mainly in the event that I later choose to plot a total # 
 ```{r}
 total_stations <- stations_yr %>%
@@ -227,13 +256,9 @@ coord_sf(xlim= xlim , ylim= ylim, crs = 4326)+ # specifies our spp specific dist
 
 I am purposely choosing to keep the current boundaries that I have because I like the standardized maps, but these could def be easily altered in the future! 
 
-***NOTE***
-As of June 29th, 2018: I am updating the underlying basemap for these for loops because the ggmap function for getmap() returns maps that do not project properly with our point catch data. I was able to correctly project a .shp file of states and am playing around with a hillshade layer (downloaded from https://koordinates.com/ but from cal-atlas, 30m)
+***NOTE*** I originally planned to plot these graphs with the package {ggmap}, function getmap()--but it returned maps that did not project properly with our point catch data. I was able to correctly project a .shp file of states, and the ocean basin and terrain in WGS84, but these maps were downloaded and stored in the directory.
 
-Also trying USGS map 
-https://catalog.data.gov/dataset/usgs-hill-shade-base-map-service-from-the-national-map
+***NOTE*** I will eventually need to consider standardizing all of the catch values so that they are a standard scale, and not based on relative measures (for myctophid catch that is) as currently they are simply relative measures based on a given year's catch (ie a large bubble on a plot may be smaller than another bubble for a different year)- I think it is fine for my purposes at this point but could be important for comparing myctophid catch in the future.
 
-Or open street map
-http://download.osmand.net/hillshade/ and downloaded the map for California- no idea what reference info 
-
+Note that I am finally trying to play around with converting this output into a shiny app. as of 08/20/18
 
