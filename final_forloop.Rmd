@@ -79,12 +79,15 @@ stations_yr <- juv_haul %>% # creates new column of just years using the year() 
 Next, I need to add latitude and longitude values. 
 Can use sum(is.na(stations$LONGITUDE)) to check to ensure there are still no stations missing lat long data
 ```{r combine dfs via bind_rows, echo=TRUE, results='hide'}
-# combine station lists from the SWFSC (stations) with the list from the NWFSC (nwfsc_stations) via rbind (bind by row)
-# in dplyr this is accomplished via the bind_rows() function 
-swfsc_stations <- select(swfsc_stations, -ACTIVE) # remove row only in swfsc_stations df, not nwfsc_stations
-nwfsc_stations$LATITUDE <- as.numeric(nwfsc_stations$LATITUDE) # convert all values to numeric- so in the same class class(nwfsc_stations$LATITUDE)
-stations<- bind_rows(swfsc=swfsc_stations, nwfsc=nwfsc_stations, .id = "sci_center") # combine rows from swfsc and nwfsc dfs (all have same columns) also created new column for "sci_center" to describe which science center the site came from 
-# note this still returns an error because the factor levels are different which they are- all good
+# combine station lists from the SWFSC (stations) with the list from the NWFSC (nwfsc_stations) via rbind
+swfsc_stations<- swfsc_stations %>% 
+                  select(-ACTIVE)%>% # remove "ACTIVE" column from swfsc_stations df, so that these two dfs are the same for the rbind merge
+                  mutate(SCI_CENTER= "SWFSC") # create a new columns for science center in case I ever wish to select by this later
+nwfsc_stations$LATITUDE <- as.numeric(unlist(nwfsc_stations$LATITUDE)) # convert latitude values from integer to numeric- note need "unlist" to avoid error message
+nwfsc_stations <-mutate(nwfsc_stations, SCI_CENTER="NWFSC")
+
+stations<- rbind(swfsc_stations, nwfsc_stations) # combine rows from two dfs into one df, stations
+
 ```
 
 ### Convert station coordinates from decimal minutes to decimal degrees #####
@@ -177,8 +180,8 @@ years <- unique(catch$year) # this is a list of each year that the survey operat
 ### For particular spp or year combination
 ```{r for loop for generating maps, echo=TRUE}
 
-spp<- "BLUE LANTERNFISH" #unique(catch$COMMON_NAME)
-years<- c(2015, 2017) #unique(catch$year)
+spp<- "OCTOPUS" #unique(catch$COMMON_NAME)
+years<- c(2013, 2014, 2015, 2017) #unique(catch$year)
 
 # select species
 for(i in 1:length(spp)) {

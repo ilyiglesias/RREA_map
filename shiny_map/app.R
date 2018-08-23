@@ -1,11 +1,7 @@
-# to run, select "Run App"
-# will eventually need to set this up with shinyapps.io token (from account i set up at shinyapps.io)
-# install.packages("rsconnect")
+# SHINY APP!! The following app creates a map for a given selection of species and year. It is linked to my shinyio account (ilyiglesias). Note that these files are also stored (and backed up on git) under rrea_map because I delevloped them in the same R project- however, I then moved all of the files including data to shiny_map to actually publish online
 
-# run code to upload data and create basemaps: 
-
-#source("run_before_shiny.R")
-
+# run code to upload data and create basemaps via:
+   #source("run_before_shiny.R")
 # need to create UI for selecting specific values from dataframe
 # values for select box (species common names)
 select_box_spp <- catch %>%
@@ -19,9 +15,6 @@ slider_years<- catch %>%
                       select(year)%>%
                       distinct()%>%
                       arrange(year)
-
-
-
 
 
 
@@ -40,12 +33,12 @@ ui <- fluidPage(
             selectInput(inputId= "select", 
                     label = h3("Species:", style = "font-family: 'times'", 
                     helpText(h6("Select species by common name- note that not all species were enumerated for each year", style= "font-family: 'times'" , align="center"))), 
-                    choices = (select_box_spp),  # !!!!!! need to figure out how to load these here
+                    choices = (select_box_spp),  # list of unique spp names from catch df
                     selected = 1),
         
         # insert image--- cruise catch 
             img(src = "catch.jpg", width= 100, height= 100, align= "center"),
-        
+           
    # Sidebar- Slider --- survey year
              sliderInput(inputId = "slider",
                      label= h3("Survey Year:", style = "font-family: 'times'"),
@@ -55,7 +48,7 @@ ui <- fluidPage(
                      helpText(h6("Survey began in 1983- but the spatial coverage has varied greatly since that time"), style= "font-family: 'times'" , align="center")), 
       
     # Show a plot of the generated distribution
-      mainPanel(plotOutput(outputId= "map") # name output object
+      mainPanel(plotOutput(outputId= "map", width = "100%") # name output object
    )
 )
 )
@@ -129,3 +122,9 @@ server <- function(input, output) {
 ########################## Run the application ##################
 shinyApp(ui = ui, server = server)
 
+############################ Publish on server ####################
+#rsconnect::setAccountInfo(name='ilyiglesias',
+ # token='C7D0B7F515311744426ED8A7D0F5D79A',
+ # secret='YdDEQ0sH5CWwRMV8UKOal//Tlag/C0KbLtHTBBU0')
+
+rsconnect::showLogs()
